@@ -180,7 +180,7 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
       </div>
       <div class="pb">
         <div id="elist"></div>
-        <button class="badd" onclick="addExp()">+ Adicionar categoria</button>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted);font-family:var(--mono);text-align:center;padding:6px">Gerencie categorias direto na planilha Google Sheets</div>
       </div>
     </div>
     <div class="panel"><div class="ph"><span class="pt">Evolução anual</span></div><div class="pb"><div class="cw" style="height:240px"><canvas id="chgas" role="img" aria-label="Total de gastos por mês"></canvas></div></div></div>
@@ -310,7 +310,7 @@ const fmt=n=>'R$ '+n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFrac
 const fpt=n=>(n>=0?'+':'')+n.toFixed(2)+'%';
 const pn=s=>parseFloat(String(s||'').replace(/[R$\s.]/g,'').replace(',','.'))||0;
 
-function parseCSV(t){
+function parseCSV(t, forceSkip){
   const rows=[];let c='',q=false,cs=[];
   for(let i=0;i<t.length;i++){
     const ch=t[i];
@@ -320,18 +320,20 @@ function parseCSV(t){
     else c+=ch;
   }
   if(c.trim()||cs.length){cs.push(c.trim());rows.push(cs);}
-  // Se linha 0 tem só 1 célula preenchida = título — pula para linha 2
-  let startRow=0;
-  if(rows.length>=3){
-    const r0=rows[0].filter(x=>x.trim()).length;
-    const r2=rows[2]?rows[2].filter(x=>x.trim()).length:0;
-    if(r0<=1&&r2>=2) startRow=2;
+  // Detecta linha do título: se linha 0 tem <=1 célula preenchida, pula 2 linhas
+  let s = forceSkip!=null ? forceSkip : 0;
+  if(!forceSkip && rows.length>=3){
+    const n0=rows[0].filter(x=>x.trim()).length;
+    if(n0<=1) s=2;
   }
-  const h=rows[startRow]||[];
-  const data=rows.slice(startRow+1).filter(r=>r.some(x=>x.trim())).map(r=>{
-    const o={};h.forEach((k,i)=>{if(k.trim())o[k.trim()]=(r[i]||'').trim();});return o;
+  const h=rows[s]||[];
+  return rows.slice(s+1).filter(r=>r.some(x=>x.trim())).map(r=>{
+    const o={};
+    h.forEach((k,i)=>{ const key=k.trim(); if(key) o[key]=(r[i]||'').trim(); });
+    // Also store by index for positional fallback
+    r.forEach((v,i)=>{ o['__col'+i]=(v||'').trim(); });
+    return o;
   });
-  return data;
 }
 
 function setBadge(type,label){
@@ -378,14 +380,16 @@ async function syncAll(){
   if(S.urls.inv){
     const d=await fetchCSV(S.urls.inv,'stinv');
     if(d&&d.length){
-      const keys=Object.keys(d[0]);
-      const tk=keys.find(k=>k.toLowerCase().includes('ticker')||k.toLowerCase().includes('papel'))||keys[1];
-      const qk=keys.find(k=>k.toLowerCase().includes('qtd')||k.toLowerCase().includes('quant'))||keys[4];
-      // Busca por 'médio' ou 'preço médio' — NÃO usa 'compra' pois pegaria 'Data Compra'
-      const pk=keys.find(k=>k.toLowerCase().includes('médio')||k.toLowerCase().includes('medio')||k.toLowerCase().includes('preço')||k.toLowerCase().includes('preco')||k.toLowerCase().includes('pm '))||keys[5];
-      const ek=keys.find(k=>k.toLowerCase().includes('empres'))||keys[0];
-      const sk=keys.find(k=>k.toLowerCase().includes('setor'));
-      const mp=d.filter(r=>r[tk]&&r[tk].trim()&&pn(r[qk])>0).map(r=>({t:r[tk].trim(),e:(r[ek]||r[tk]).trim(),s:sk?r[sk]||'—':'—',q:pn(r[qk]),pm:pn(r[pk]),tl:0.04})).filter(r=>r.q>0&&r.t.length>0);
+      // Posições fixas conforme a planilha:
+      // col0=Empresa, col1=Ticker, col2=Setor, col3=Data Compra, col4=Qtd, col5=Preço Médio
+      const mp=d.filter(r=>r['__col1']&&r['__col1'].trim()&&pn(r['__col4'])>0).map(r=>({
+        t: r['__col1'].trim(),
+        e: (r['__col0']||r['__col1']).trim(),
+        s: r['__col2']||'—',
+        q: pn(r['__col4']),
+        pm: pn(r['__col5']),
+        tl: 0.04
+      })).filter(r=>r.q>0&&r.t.length>0&&isNaN(Date.parse(r.pm?String(r.pm):'x')));
       if(mp.length){S.port=mp;ok++;}
     }
   }
@@ -393,11 +397,14 @@ async function syncAll(){
   if(S.urls.gas){
     const d=await fetchCSV(S.urls.gas,'stgas');
     if(d&&d.length){
-      const dk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('desc')||k.toLowerCase().includes('categ')||k.toLowerCase().includes('descri'))||Object.keys(d[0])[0];
-      // Month columns can be "JAN","FEV" (uppercase) or "Jan","Fev"
-      const ne=d.filter(r=>{const nm=r[dk]||'';return nm.trim()&&!nm.toUpperCase().includes('TOTAL')&&!nm.toUpperCase().includes('MENSAL');}).map((r,i)=>({
-        id:i+1,name:(r[dk]||'').trim(),
-        v:MO.map(m=>{const k=Object.keys(r).find(k2=>k2.trim().toLowerCase()===m.toLowerCase()||k2.trim().toUpperCase()===m.toUpperCase());return pn(r[k]||'0');})
+      // col0=Descrição, col1=Jan, col2=Fev, ... col12=Dez, col13=Total
+      const ne=d.filter(r=>{
+        const nm=r['__col0']||'';
+        return nm.trim()&&!nm.toUpperCase().includes('TOTAL')&&!nm.toUpperCase().includes('MENSAL');
+      }).map((r,i)=>({
+        id:i+1,
+        name:(r['__col0']||'').trim(),
+        v:[1,2,3,4,5,6,7,8,9,10,11,12].map(ci=>pn(r['__col'+ci]||'0'))
       })).filter(r=>r.name.length>0);
       if(ne.length){S.exp=ne;ok++;}
     }
@@ -562,10 +569,8 @@ function renderExp(){
   const el=document.getElementById('elist');
   if(!S.exp.length){el.innerHTML='<div style="color:var(--muted);font-size:11px;padding:10px 0;text-align:center;font-family:var(--mono)">Sem gastos. Adicione ou sincronize.</div>';return;}
   el.innerHTML=S.exp.map(e=>`<div class="er">
-    <div class="en" contenteditable="true" onblur="renExp(${e.id},this.textContent)" style="outline:none;cursor:text">${e.name}</div>
-    <span style="font-size:11px;color:var(--muted);font-family:var(--mono)">R$</span>
-    <input class="ei" type="number" value="${(e.v[S.curMo]||0).toFixed(2)}" min="0" step="10" onchange="updExpV(${e.id},${S.curMo},this.value)" oninput="updExpV(${e.id},${S.curMo},this.value)">
-    <button class="bdel" onclick="delExp(${e.id})">×</button>
+    <div class="en">${e.name}</div>
+    <span class="mn" style="font-size:13px;color:var(--teal);font-weight:600">${(e.v[S.curMo]||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}</span>
   </div>`).join('');
 }
 
