@@ -316,8 +316,15 @@ function parseCSV(t){
     else c+=ch;
   }
   if(c.trim()||cs.length){cs.push(c.trim());rows.push(cs);}
-  const h=rows[0]||[];
-  return rows.slice(1).filter(r=>r.some(x=>x)).map(r=>{const o={};h.forEach((k,i)=>o[k]=(r[i]||'').trim());return o;});
+  // Skip title row + empty row if present (planilhas com título na linha 1)
+  let startRow=0;
+  if(rows.length>=3){
+    const r0=rows[0].filter(x=>x.trim()).length;
+    const r2=rows[2].filter(x=>x.trim()).length;
+    if(r0<=1&&r2>1) startRow=2;
+  }
+  const h=rows[startRow]||[];
+  return rows.slice(startRow+1).filter(r=>r.some(x=>x)).map(r=>{const o={};h.forEach((k,i)=>o[k]=(r[i]||'').trim());return o;});
 }
 
 function setBadge(type,label){
@@ -364,12 +371,13 @@ async function syncAll(){
   if(S.urls.inv){
     const d=await fetchCSV(S.urls.inv,'stinv');
     if(d&&d.length){
-      const tk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('ticker')||k.toLowerCase().includes('papel'))||Object.keys(d[0])[0];
-      const qk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('quant'))||Object.keys(d[0])[3];
-      const pk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('preco')||k.toLowerCase().includes('compra'))||Object.keys(d[0])[4];
-      const ek=Object.keys(d[0]).find(k=>k.toLowerCase().includes('empres'))||Object.keys(d[0])[0];
-      const sk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('setor'));
-      const mp=d.filter(r=>r[tk]&&pn(r[qk])>0).map(r=>({t:r[tk].trim(),e:(r[ek]||r[tk]).trim(),s:sk?r[sk]||'—':'—',q:pn(r[qk]),pm:pn(r[pk]),tl:0.04})).filter(r=>r.q>0);
+      const keys=Object.keys(d[0]);
+      const tk=keys.find(k=>k.toLowerCase().includes('ticker')||k.toLowerCase().includes('papel'))||keys[1];
+      const qk=keys.find(k=>k.toLowerCase().includes('qtd')||k.toLowerCase().includes('quant'))||keys[4];
+      const pk=keys.find(k=>k.toLowerCase().includes('médio')||k.toLowerCase().includes('medio')||k.toLowerCase().includes('preco')||k.toLowerCase().includes('compra'))||keys[5];
+      const ek=keys.find(k=>k.toLowerCase().includes('empres'))||keys[0];
+      const sk=keys.find(k=>k.toLowerCase().includes('setor'));
+      const mp=d.filter(r=>r[tk]&&r[tk].trim()&&pn(r[qk])>0).map(r=>({t:r[tk].trim(),e:(r[ek]||r[tk]).trim(),s:sk?r[sk]||'—':'—',q:pn(r[qk]),pm:pn(r[pk]),tl:0.04})).filter(r=>r.q>0&&r.t.length>0);
       if(mp.length){S.port=mp;ok++;}
     }
   }
@@ -377,11 +385,12 @@ async function syncAll(){
   if(S.urls.gas){
     const d=await fetchCSV(S.urls.gas,'stgas');
     if(d&&d.length){
-      const dk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('desc')||k.toLowerCase().includes('categ'))||Object.keys(d[0])[0];
-      const ne=d.filter(r=>{const nm=r[dk]||'';return nm.trim()&&!nm.toUpperCase().includes('TOTAL');}).map((r,i)=>({
+      const dk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('desc')||k.toLowerCase().includes('categ')||k.toLowerCase().includes('descri'))||Object.keys(d[0])[0];
+      // Month columns can be "JAN","FEV" (uppercase) or "Jan","Fev"
+      const ne=d.filter(r=>{const nm=r[dk]||'';return nm.trim()&&!nm.toUpperCase().includes('TOTAL')&&!nm.toUpperCase().includes('MENSAL');}).map((r,i)=>({
         id:i+1,name:(r[dk]||'').trim(),
-        v:MO.map(m=>{const k=Object.keys(r).find(k2=>k2.trim().toLowerCase()===m.toLowerCase());return pn(r[k]||'0');})
-      }));
+        v:MO.map(m=>{const k=Object.keys(r).find(k2=>k2.trim().toLowerCase()===m.toLowerCase()||k2.trim().toUpperCase()===m.toUpperCase());return pn(r[k]||'0');})
+      })).filter(r=>r.name.length>0);
       if(ne.length){S.exp=ne;ok++;}
     }
   }
@@ -394,7 +403,12 @@ async function syncAll(){
       const vk=Object.keys(d[0]).find(k=>k.toLowerCase().includes('valor'))||Object.keys(d[0])[2];
       const rec=d.find(r=>(r[ck]||'').toUpperCase().includes('RECEIT'));
       if(rec){const v=pn(rec[vk]);if(v>0){S.inc=v;document.getElementById('incinp').value=v;}}
-      const cats=d.filter(r=>r[ck]&&!(r[ck]||'').toUpperCase().includes('RECEIT')).map((r,i)=>({n:r[ck],p:pn(r[pk2])/100,c:CC[i%CC.length]})).filter(c=>c.p>0);
+      // pct can be 0.35 (decimal) or 35 (percentage) — normalize both
+      const cats=d.filter(r=>r[ck]&&!(r[ck]||'').toUpperCase().includes('RECEIT')&&pn(r[pk2])>0).map((r,i)=>{
+        const rawPct=pn(r[pk2]);
+        const p=rawPct>1?rawPct/100:rawPct;
+        return{n:r[ck],p,c:CC[i%CC.length]};
+      }).filter(c=>c.p>0);
       if(cats.length){S.cats=cats;ok++;}
     }
   }
@@ -428,28 +442,23 @@ async function fetchB3(){
   const btn=document.getElementById('qbtn'),dot=document.getElementById('qdot');
   if(!S.port.length){document.getElementById('qst').textContent='Sem ativos. Configure o Google Sheets primeiro.';return;}
   btn.disabled=true;btn.textContent='buscando...';
-  document.getElementById('qst').textContent='Consultando cotações da B3...';
+  document.getElementById('qst').textContent='Buscando cotações na B3 via brapi.dev...';
   dot.className='sdot warn';
-  const tickers=S.port.map(s=>s.t).join(', ');
+  const tickers=S.port.map(s=>s.t).join(',');
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:500,
-        tools:[{"type":"web_search_20250305","name":"web_search"}],
-        messages:[{role:'user',content:`Busque cotação atual de ${tickers} na B3 agora. Responda SOMENTE com JSON puro sem markdown: {"VAMO3":3.98,"WIZC3":9.69}`}]
-      })
-    });
+    const res=await fetch(`https://brapi.dev/api/quote/${tickers}?token=anonymous`);
+    if(!res.ok) throw new Error('HTTP '+res.status);
     const data=await res.json();
-    let found=null;
-    for(const b of(data.content||[]).filter(b=>b.type==='text')){
-      const m=b.text.match(/\{[\s\S]*?"[A-Z0-9]+"[\s\S]*?\}/);
-      if(m){try{found=JSON.parse(m[0]);}catch(e){}}if(found)break;
-    }
-    if(found&&Object.keys(found).length){
-      S.lp=found;
+    const results=data.results||[];
+    if(results.length){
+      results.forEach(r=>{if(r.symbol&&r.regularMarketPrice) S.lp[r.symbol]=r.regularMarketPrice;});
       document.getElementById('qts').textContent=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
       dot.className='sdot live';
-      document.getElementById('qst').textContent='Cotações atualizadas';
-    } else {document.getElementById('qst').textContent='Não foi possível obter cotações.';dot.className='sdot err';}
+      document.getElementById('qst').textContent='Cotações atualizadas via brapi.dev';
+    } else {
+      document.getElementById('qst').textContent='Nenhuma cotação retornada. Verifique os tickers.';
+      dot.className='sdot err';
+    }
   }catch(e){document.getElementById('qst').textContent='Erro: '+e.message;dot.className='sdot err';}
   btn.disabled=false;btn.textContent='Buscar cotações';
   renderPort();setTimeout(()=>renderInvCh(),80);
